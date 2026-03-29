@@ -1,0 +1,17 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+*.h5ad
+*.h5
+*.rds
+*.parquet
+*.mtx.gz
+*.csv.gz
+*.zarr
+*.geojson
+*.csv
+*.log
+
+**/xenium_explorer/

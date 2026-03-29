@@ -1,0 +1,88 @@
+[11:21:55] ========================================================
+[11:21:55]    build_reference.R
+[11:21:55] ========================================================
+
+[11:21:55] === STEP 1: Loading inputs ===
+
+[11:21:55] --- HSCA_ref (type = rds) ---
+[11:22:27] HSCA_ref | Loaded RDS: 144699 cells, 48481 genes
+[11:22:27] HSCA_ref | Found 2 pre-existing layers -- joining
+[11:22:41] HSCA_ref | Rebuilding RNA assay (stripping: data)
+[11:22:55] HSCA_ref | RNA layers: counts
+[11:22:55] HSCA_ref | Annotation column 'inherited_celltype_lvl_5_extended': 109 types
+[11:22:55] HSCA_ref | QC skipped (skip_qc = TRUE)
+[11:23:02] HSCA_ref | Doublet removal skipped (skip_doublets = TRUE)
+[11:23:02] HSCA_ref | Final: 144699 cells
+
+[11:23:02] --- CW_ref (type = rds) ---
+[11:23:08] CW_ref | Loaded RDS: 48346 cells, 36600 genes
+[11:23:08] CW_ref | Found 9 pre-existing layers -- joining
+[11:23:16] CW_ref | RNA layers: counts
+[11:23:16] CW_ref | Annotation column 'CellType': 20 types
+[11:23:16] CW_ref | QC skipped (skip_qc = TRUE)
+[11:23:16] CW_ref | Doublet removal skipped (skip_doublets = TRUE)
+[11:23:16] CW_ref | Final: 48346 cells
+
+[11:23:16] === STEP 2: Label harmonization ===
+
+[11:23:16] Label template written: ./reference//label_mapping_template.csv
+[11:23:16] Found label_mapping.csv -- applying harmonization
+[11:23:16]   Sources in mapping file: CW_ref
+[11:23:16] HSCA_ref | No mapping entries -- using original labels as-is (109 types)
+[11:23:16] CW_ref | Mapped: 19 consensus types, 48346 cells
+[11:23:16] HSCA_ref | 109 consensus types, 144699 cells
+[11:23:16] CW_ref | 19 consensus types, 48346 cells
+[11:23:16] 
+=== STEP 3: Merge and integrate ===
+
+[11:24:41] RNA layers after cleanup: counts
+[11:24:42] Merged: 193045 cells, 52110 genes
+[11:24:42] Sources: HSCA_ref, CW_ref
+[11:24:42] 
+Splitting layers by ref_source for per-batch normalization...
+[11:24:52] Normalization method: lognormalize
+[11:24:52] Running NormalizeData + FindVariableFeatures + ScaleData...
+[11:26:34] Running PCA...
+[11:27:49] Integrating with: harmony
+[11:35:56] Integration complete. Reduction: harmony
+[11:35:56] 
+=== STEP 5: Label transfer -- not needed (all inputs annotated) ===
+[11:35:57] 
+=== STEP 6: Post-transfer QC ===
+
+[11:35:57] Final: 193045 cells, 114 types
+[11:35:57] 
+=== STEP 7: Exporting ===
+
+[11:43:39] Seurat reference        -> ./reference//consensus_reference.rds
+[11:43:39] Training SingleR model (wilcox DE)...
+[11:48:18] SingleR trained model   -> ./reference//singler_trained.rds
+[11:53:10] RCTD reference          -> ./reference//rctd_reference_components.rds
+[11:53:10] 
+=== STEP 8: QC plots ===
+
+[11:54:08] UMAP plots              -> ./reference//reference_umap.pdf
+[11:54:08] 
+========================================================
+[11:54:08]    REFERENCE BUILD COMPLETE
+[11:54:08] ========================================================
+[11:54:08] Total cells:         193045
+[11:54:08] Total genes:         52110
+[11:54:08] Input sources:       HSCA_ref, CW_ref
+[11:54:08] Consensus types:     114
+[11:54:08] Original labels:     193045
+[11:54:08] Transferred labels:  0
+[11:54:08] Integration method:  harmony
+[11:54:08] Normalization:       lognormalize
+[11:54:08] Label mode:          default (label_mapping.csv)
+[11:54:08] Output directory:    /home/uvictor/hyms_chronic_wounds/reference
+[11:54:08] 
+[11:54:08] Files:
+[11:54:08]   consensus_reference.rds          Integrated Seurat v5 object
+[11:54:08]   singler_trained.rds              Pre-trained SingleR model
+[11:54:08]   rctd_reference_components.rds    counts + cell_types + nUMI
+[11:54:08]   reference_umap.pdf               Integration QC (3 panels)
+[11:54:08]   reference_type_counts.csv        Per-source cell counts
+[11:54:08]   label_mapping_template.csv       Edit -> label_mapping.csv
+[11:54:08]   reference_build_log.txt          This log
+[11:54:08] ========================================================
