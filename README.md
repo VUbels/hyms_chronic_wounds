@@ -27,9 +27,8 @@ Rscript ./scripts/prepare_objects.R
 
 
 
-################################################################################
 
-You can opt to look at the segmentation and troubleshoot yourselves by running 
+## You can opt to look at the segmentation and troubleshoot yourselves by running 
 
 gene_diagnostic.R or compare_segmentation.R in any IDE (Rstudio for example) and
 run through each line individually so you can see/compare plots and data easily.
