@@ -27,10 +27,29 @@ seurat_proseg <- load_proseg_full(
   xenium_fov_name   = "xenium"
 )
 
+seurat_proseg <- subset(seurat_proseg, subset = nCount_RNA > 0)
+
+# Before SCTransform, check what subset did
+cat("Cells after subset:", ncol(seurat_proseg), "\n")
+cat("FOV proseg cells:", length(Cells(seurat_proseg[["proseg"]])), "\n")
+cat("FOV xenium cells:", length(Cells(seurat_proseg[["xenium"]])), "\n")
+
+# Check if FOV cells are a subset of Seurat cells
+proseg_fov_cells <- Cells(seurat_proseg[["proseg"]], boundary = "centroids")
+xenium_fov_cells <- Cells(seurat_proseg[["xenium"]], boundary = "centroids")
+
+cat("proseg FOV cells in Seurat:", sum(proseg_fov_cells %in% colnames(seurat_proseg)), "/", length(proseg_fov_cells), "\n")
+cat("xenium FOV cells in Seurat:", sum(xenium_fov_cells %in% colnames(seurat_proseg)), "/", length(xenium_fov_cells), "\n")
+
+seurat_proseg <- SCTransform(seurat_proseg, assay = "RNA", return.only.var.genes = FALSE)
+seurat_proseg <- RunPCA(seurat_proseg, npcs = 30, features = rownames(seurat_proseg))
+seurat_proseg <- RunUMAP(seurat_proseg, dims = 1:20)
+seurat_proseg <- FindNeighbors(seurat_proseg, reduction = "pca", dims = 1:30)
+seurat_proseg <- FindClusters(seurat_proseg, resolution = 0.7)
+
 # ---- Native Seurat functions now work ----
 ImageDimPlot(seurat_proseg, fov = "proseg")
 ImageDimPlot(seurat_proseg, fov = "xenium")
-#ImageFeaturePlot(seurat_proseg, features = "SERPINB7", fov = "proseg")
 
 # Zoomed with polygon boundaries visible
 DefaultBoundary(seurat_proseg[["proseg"]]) <- "segmentation"
@@ -45,6 +64,9 @@ ImageDimPlot(seurat_proseg, fov = "xenium")
 # Switch to nuclei view
 DefaultBoundary(seurat_proseg[["xenium"]]) <- "nuclei"
 ImageDimPlot(seurat_proseg, fov = "xenium")
+
+ImageFeaturePlot(seurat_proseg, features = "SERPINB7", fov = "proseg")
+
 
 #########################
 # DIAGNOSTICS

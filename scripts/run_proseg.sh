@@ -31,18 +31,18 @@
 #   - proseg-to-baysor (installed alongside proseg)
 #
 # Output structure per region:
-#   <output_dir>/proseg/<region_name>/
-#     ├── python/
-#     │   └── proseg-output.zarr        # spatialdata format
-#     ├── r_seurat/
-#     │   ├── counts.mtx.gz             # sparse count matrix
-#     │   ├── cell-metadata.csv.gz      # cell centroids, volume, etc.
-#     │   ├── gene-metadata.csv.gz      # per-gene summary stats
-#     │   └── transcript-metadata.csv.gz
-#     ├── xenium_explorer/
-#     │   ├── transcript-metadata.csv   # baysor-compatible transcript table
-#     │   └── cell-polygons.geojson     # baysor-compatible polygons
-#     └── proseg.log                    # stdout + stderr log
+#   <output_dir>/<region_name>/
+#     ├── proseg-output.zarr              # spatialdata format
+#     ├── counts.mtx.gz                   # sparse count matrix
+#     ├── cell-metadata.csv.gz            # cell centroids, volume, etc.
+#     ├── gene-metadata.csv.gz            # per-gene summary stats
+#     ├── transcript-metadata.csv.gz
+#     ├── cell-polygons.geojson.gz
+#     ├── proseg.log                      # stdout + stderr log
+#     └── xenium_explorer/
+#         ├── transcript-metadata.csv     # baysor-compatible transcript table
+#         ├── cell-polygons.geojson       # baysor-compatible polygons
+#         └── import_to_xenium_ranger.sh
 #
 
 set -euo pipefail
@@ -65,7 +65,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 log_info()  { echo -e "${BLUE}[INFO]${NC}  $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 log_ok()    { echo -e "${GREEN}[OK]${NC}    $(date '+%Y-%m-%d %H:%M:%S') $*"; }
@@ -110,13 +110,11 @@ resolve_proseg() {
         fi
     fi
 
-    # Check PATH first
     if command -v proseg &>/dev/null; then
         command -v proseg
         return
     fi
 
-    # Check local submodule build
     local local_bin="./proseg/target/release/proseg"
     if [[ -x "$local_bin" ]]; then
         echo "$local_bin"
@@ -130,7 +128,6 @@ resolve_proseg() {
 PROSEG_BIN="$(resolve_proseg)"
 log_info "Using proseg binary: $PROSEG_BIN"
 
-# Verify proseg-to-baysor is also available (installed alongside proseg)
 PROSEG_TO_BAYSOR=""
 if command -v proseg-to-baysor &>/dev/null; then
     PROSEG_TO_BAYSOR="$(command -v proseg-to-baysor)"
@@ -179,7 +176,6 @@ process_region() {
     region_dir="$(dirname "$parquet_path")"
     region_name="$(basename "$region_dir")"
 
-    # Sanitize region name for directory creation (replace spaces with underscores)
     local safe_name
     safe_name="$(echo "$region_name" | tr ' ' '_')"
 
@@ -196,38 +192,33 @@ process_region() {
         return 0
     fi
 
-    # Create output subdirectories
-    mkdir -p "$out_base"/{python,r_seurat,xenium_explorer}
+    # Only xenium_explorer gets its own subdirectory
+    mkdir -p "$out_base"
+    mkdir -p "$out_base/xenium_explorer"
 
     # ------------------------------------------------------------------
-    # Step 1: Run proseg
+    # Step 1: Run proseg — all outputs flat in out_base
     # ------------------------------------------------------------------
     local proseg_cmd=(
         "$PROSEG_BIN"
         --xenium
         --overwrite
-        # Python output: spatialdata zarr
-        --output-spatialdata "$out_base/python/proseg-output.zarr"
-        # R / Seurat output: counts + metadata
-        --output-counts "$out_base/r_seurat/counts.mtx.gz"
-        --output-cell-metadata "$out_base/r_seurat/cell-metadata.csv.gz"
-        --output-gene-metadata "$out_base/r_seurat/gene-metadata.csv.gz"
-        --output-transcript-metadata "$out_base/r_seurat/transcript-metadata.csv.gz"
-        # Cell boundary polygons (useful for both R and general QC)
-        --output-cell-polygons "$out_base/r_seurat/cell-polygons.geojson.gz"
+        --output-spatialdata "$out_base/proseg-output.zarr"
+        --output-counts "$out_base/counts.mtx.gz"
+        --output-cell-metadata "$out_base/cell-metadata.csv.gz"
+        --output-gene-metadata "$out_base/gene-metadata.csv.gz"
+        --output-transcript-metadata "$out_base/transcript-metadata.csv.gz"
+        --output-cell-polygons "$out_base/cell-polygons.geojson.gz"
     )
 
-    # Optional: thread control
     if [[ -n "$THREADS" ]]; then
         proseg_cmd+=(--nthreads "$THREADS")
     fi
 
-    # Append any extra proseg arguments
     if [[ ${#EXTRA_PROSEG_ARGS[@]} -gt 0 ]]; then
         proseg_cmd+=("${EXTRA_PROSEG_ARGS[@]}")
     fi
 
-    # Input file must be last positional argument
     proseg_cmd+=("$parquet_path")
 
     log_info "Running proseg..."
@@ -258,7 +249,7 @@ process_region() {
 
         local baysor_cmd=(
             "$PROSEG_TO_BAYSOR"
-            "$out_base/python/proseg-output.zarr"
+            "$out_base/proseg-output.zarr"
             --output-transcript-metadata "$out_base/xenium_explorer/transcript-metadata.csv"
             --output-cell-polygons "$out_base/xenium_explorer/cell-polygons.geojson"
         )
@@ -266,7 +257,6 @@ process_region() {
         if "${baysor_cmd[@]}" 2>&1 | tee -a "$out_base/proseg.log"; then
             log_ok "Xenium Explorer conversion complete for $region_name"
 
-            # Write a helper script for the xeniumranger import step
             cat > "$out_base/xenium_explorer/import_to_xenium_ranger.sh" <<XENIUM_EOF
 #!/usr/bin/env bash
 # Run this to import proseg segmentation into Xenium Explorer.
@@ -309,9 +299,6 @@ log_info "  Output root: $OUTPUT_DIR/"
 echo ""
 
 if [[ "$PARALLEL_JOBS" -le 1 ]]; then
-    # ------------------------------------------------------------------
-    # Sequential execution
-    # ------------------------------------------------------------------
     for i in "${!PARQUET_FILES[@]}"; do
         log_info "Region $(( i + 1 )) / $TOTAL"
         if process_region "${PARQUET_FILES[$i]}"; then
@@ -323,15 +310,10 @@ if [[ "$PARALLEL_JOBS" -le 1 ]]; then
         echo ""
     done
 else
-    # ------------------------------------------------------------------
-    # Parallel execution
-    # ------------------------------------------------------------------
-    # Export function and variables so subshells can access them
     export INPUT_DIR OUTPUT_DIR THREADS DRY_RUN PROSEG_BIN PROSEG_TO_BAYSOR
     export -a EXTRA_PROSEG_ARGS
     export -f process_region log_info log_ok log_warn log_error
 
-    # Use GNU parallel if available, otherwise xargs with background jobs
     if command -v parallel &>/dev/null; then
         log_info "Using GNU parallel with $PARALLEL_JOBS jobs"
         printf '%s\n' "${PARQUET_FILES[@]}" | \
@@ -346,19 +328,18 @@ else
             process_region "$parquet_path" &
             (( local_running++ )) || true
             if (( local_running >= PARALLEL_JOBS )); then
-                wait -n  # Wait for any one job to finish
+                wait -n
                 (( local_running-- )) || true
             fi
         done
-        wait  # Wait for remaining jobs
+        wait
     fi
 
-    # In parallel mode, count results from output directories
     for f in "${PARQUET_FILES[@]}"; do
         region_dir="$(dirname "$f")"
         region_name="$(basename "$region_dir")"
         safe_name="$(echo "$region_name" | tr ' ' '_')"
-        if [[ -d "${OUTPUT_DIR}/${safe_name}/python/proseg-output.zarr" ]]; then
+        if [[ -d "${OUTPUT_DIR}/${safe_name}/proseg-output.zarr" ]]; then
             (( SUCCESS++ )) || true
         else
             (( FAILED++ )) || true

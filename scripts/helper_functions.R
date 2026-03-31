@@ -37,6 +37,14 @@ load_proseg_h5ad <- function(h5ad_path) {
   adata <- read_h5ad(h5ad_path)
   seu <- adata$as_Seurat()
   
+  # Fix layer naming: anndataR stores as "X", Seurat expects "counts"
+  available_layers <- Layers(seu[["RNA"]])
+  if ("X" %in% available_layers && !"counts" %in% available_layers) {
+    seu[["RNA"]]$counts <- seu[["RNA"]]$X
+    seu[["RNA"]]$X <- NULL
+    message("Renamed layer 'X' -> 'counts'")
+  }
+  
   # Store spatial coords in metadata if available
   spatial_coords <- adata$obsm[["spatial"]]
   if (!is.null(spatial_coords)) {

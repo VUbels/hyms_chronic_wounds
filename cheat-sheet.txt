@@ -1,0 +1,6 @@
+To run proseg pipeline simply:
+
+-i: input folder containing the spatial xenium output
+-o: output-folder will recursively output data to folder within working directory
+
+./run_proseg.sh -i /mnt/d/HYMS/chronic_wounds -o ./proseg_results
