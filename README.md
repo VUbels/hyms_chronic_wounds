@@ -9,10 +9,10 @@ cd "your-directory"
 **To run proseg pipeline to resegment cells simply run the following**
 in CLI and change directory to your base working directory through:
 
-```
--i: input folder containing the spatial xenium output (Function is recursive so only point to base location)
--o: output-folder will recursively output data to folder within working directory
 
+```-i: input folder``` containing the spatial xenium output (Function is recursive so only point to base location)
+```-o: output-folder``` will recursively output data to folder within working directory
+```
 ./scripts/run_proseg.sh -i /mnt/d/HYMS/chronic_wounds -o ./proseg_results
 ```
 
