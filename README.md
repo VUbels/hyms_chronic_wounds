@@ -1,4 +1,4 @@
-#Information to use the hyms_chronic_wounds functionality
+# Information to use the hyms_chronic_wounds functionality\
 **First set your working directory to the appropriate project location in CLI:**
 
 cd "your-directory"\
