@@ -477,6 +477,7 @@ build_proseg_seurat <- function(proseg_dir,
 #   reference_dir = "./reference"
 # )
 
+library()
 
 annotate_proseg_seurat <- function(proseg_dir,
                                    reference_dir,
@@ -514,9 +515,9 @@ annotate_proseg_seurat <- function(proseg_dir,
   # DISCOVER BUILT SEURAT OBJECTS
   # ============================================================================
   
-  log_msg("================================================================")
-  log_msg(" Discovering built Seurat objects in: ", proseg_dir)
-  log_msg("================================================================\n")
+  cat("================================================================")
+  cat(" Discovering built Seurat objects in: ", proseg_dir)
+  cat("================================================================\n")
   
   rds_hits <- list.files(
     proseg_dir,
@@ -539,19 +540,19 @@ annotate_proseg_seurat <- function(proseg_dir,
       dir      = sample_dir,
       rds_path = rds_path
     )
-    log_msg("  Found: ", region_name, " -> ", rds_path)
+    cat("  Found: ", region_name, " -> ", rds_path)
   }
   
-  log_msg("\nDiscovered ", length(regions), " regions: ",
+  cat("\nDiscovered ", length(regions), " regions: ",
           paste(names(regions), collapse = ", "), "\n")
   
   # ============================================================================
   # PANEL GENES (union of rownames across all built objects)
   # ============================================================================
   
-  log_msg("================================================================")
-  log_msg(" Discovering Xenium panel genes")
-  log_msg("================================================================\n")
+  cat("================================================================")
+  cat(" Discovering Xenium panel genes")
+  cat("================================================================\n")
   
   # Use gene-metadata.csv.gz if available (lightweight), fall back to loading RDS
   panel_genes <- character(0)
@@ -561,25 +562,25 @@ annotate_proseg_seurat <- function(proseg_dir,
       gm <- fread(gm_path)
       region_genes <- gm$gene
     } else {
-      log_msg("  ", nm, ": gene-metadata.csv.gz not found, reading RDS header...")
+      cat("  ", nm, ": gene-metadata.csv.gz not found, reading RDS header...")
       tmp <- readRDS(regions[[nm]]$rds_path)
       region_genes <- rownames(tmp)
       rm(tmp); gc(verbose = FALSE)
     }
-    log_msg("  ", nm, ": ", length(region_genes), " genes")
+    cat("  ", nm, ": ", length(region_genes), " genes")
     panel_genes <- union(panel_genes, region_genes)
   }
   
   panel_genes <- sort(unique(panel_genes))
-  log_msg("\nPanel gene union: ", length(panel_genes), " genes\n")
+  cat("\nPanel gene union: ", length(panel_genes), " genes\n")
   
   # ============================================================================
   # REFERENCE + PANEL-SPECIFIC TRAINING
   # ============================================================================
   
-  log_msg("================================================================")
-  log_msg(" Building panel-specific reference models")
-  log_msg("================================================================\n")
+  cat("================================================================")
+  cat(" Building panel-specific reference models")
+  cat("================================================================\n")
   
   cache_singler <- file.path(proseg_dir, "singler_trained_panel.rds")
   cache_rctd    <- file.path(proseg_dir, "rctd_reference_panel.rds")
@@ -592,36 +593,36 @@ annotate_proseg_seurat <- function(proseg_dir,
       file.exists(cache_genes)) {
     cached_genes <- readLines(cache_genes)
     if (identical(sort(cached_genes), sort(panel_genes))) {
-      log_msg("[CACHE] Panel genes match cached models. Loading from cache.")
+      cat("[CACHE] Panel genes match cached models. Loading from cache.")
       use_cached <- TRUE
     } else {
-      log_msg("[CACHE] Panel genes changed. Retraining.")
+      cat("[CACHE] Panel genes changed. Retraining.")
     }
   }
   
   if (use_cached) {
     
     singler_trained <- readRDS(cache_singler)
-    log_msg("[CACHE] SingleR panel model loaded.")
+    cat("[CACHE] SingleR panel model loaded.")
     rctd_ref <- readRDS(cache_rctd)
-    log_msg("[CACHE] RCTD panel components loaded.\n")
+    cat("[CACHE] RCTD panel components loaded.\n")
     
   } else {
     
     ref_path <- file.path(reference_dir, "consensus_reference.rds")
-    log_msg("[REF] Loading full reference: ", ref_path)
+    cat("[REF] Loading full reference: ", ref_path)
     ref_obj <- readRDS(ref_path)
-    log_msg("[REF] Full reference: ", ncol(ref_obj), " cells, ",
+    cat("[REF] Full reference: ", ncol(ref_obj), " cells, ",
             nrow(ref_obj), " genes, ",
             length(unique(ref_obj$consensus_label)), " types")
     
     shared_genes <- intersect(rownames(ref_obj), panel_genes)
     panel_only   <- setdiff(panel_genes, rownames(ref_obj))
     
-    log_msg("[REF] Panel genes in reference: ", length(shared_genes), " / ",
+    cat("[REF] Panel genes in reference: ", length(shared_genes), " / ",
             length(panel_genes))
     if (length(panel_only) > 0) {
-      log_msg("[REF] Panel genes NOT in reference (", length(panel_only),
+      cat("[REF] Panel genes NOT in reference (", length(panel_only),
               "): ", paste(head(panel_only, 20), collapse = ", "),
               if (length(panel_only) > 20) " ..." else "")
     }
@@ -630,14 +631,14 @@ annotate_proseg_seurat <- function(proseg_dir,
            " panel genes found in reference.")
     }
     
-    log_msg("[REF] Subsetting reference to ", length(shared_genes), " panel genes...")
+    cat("[REF] Subsetting reference to ", length(shared_genes), " panel genes...")
     ref_panel <- subset(ref_obj, features = shared_genes)
     ref_panel <- ensure_clean_assay(ref_panel, "ref_panel")
     ref_panel <- NormalizeData(ref_panel, verbose = FALSE)
     rm(ref_obj); gc(verbose = FALSE)
     
     # Train SingleR
-    log_msg("[SINGLER] Training on ", length(shared_genes), " panel genes...")
+    cat("[SINGLER] Training on ", length(shared_genes), " panel genes...")
     ref_sce <- as.SingleCellExperiment(ref_panel)
     if (!"logcounts" %in% assayNames(ref_sce)) {
       logcounts(ref_sce) <- GetAssayData(ref_panel, assay = "RNA", layer = "data")
@@ -649,12 +650,12 @@ annotate_proseg_seurat <- function(proseg_dir,
       de.method = config$singler_de_method,
       BPPARAM   = MulticoreParam(config$rctd_max_cores)
     )
-    log_msg("[SINGLER] Training complete.")
+    cat("[SINGLER] Training complete.")
     saveRDS(singler_trained, cache_singler)
     rm(ref_sce); gc(verbose = FALSE)
     
     # Build RCTD components
-    log_msg("[RCTD] Building panel-gene reference components...")
+    cat("[RCTD] Building panel-gene reference components...")
     ref_counts <- GetAssayData(ref_panel, assay = "RNA", layer = "counts")
     ref_types  <- setNames(factor(ref_panel$consensus_label), colnames(ref_panel))
     ref_numi   <- setNames(colSums(ref_counts), colnames(ref_panel))
@@ -665,7 +666,7 @@ annotate_proseg_seurat <- function(proseg_dir,
       nUMI       = ref_numi
     )
     
-    log_msg("[RCTD] Panel reference: ", ncol(ref_counts), " cells, ",
+    cat("[RCTD] Panel reference: ", ncol(ref_counts), " cells, ",
             nrow(ref_counts), " genes, ",
             length(levels(ref_types)), " types")
     saveRDS(rctd_ref, cache_rctd)
@@ -677,7 +678,7 @@ annotate_proseg_seurat <- function(proseg_dir,
   ref_type_counts <- table(rctd_ref$cell_types)
   rctd_would_drop <- names(ref_type_counts[ref_type_counts < config$rctd_CELL_MIN_INSTANCE])
   if (length(rctd_would_drop) > 0) {
-    log_msg("[WARN] RCTD CELL_MIN_INSTANCE = ", config$rctd_CELL_MIN_INSTANCE,
+    cat("[WARN] RCTD CELL_MIN_INSTANCE = ", config$rctd_CELL_MIN_INSTANCE,
             " will drop ", length(rctd_would_drop), " types: ",
             paste(rctd_would_drop, collapse = ", "))
   }
@@ -700,9 +701,9 @@ annotate_proseg_seurat <- function(proseg_dir,
   
   annotate_region <- function(region_name, region_info) {
     
-    log_msg("\n========================================")
-    log_msg(" REGION: ", region_name)
-    log_msg("========================================\n")
+    cat("\n========================================")
+    cat(" REGION: ", region_name)
+    cat("========================================\n")
     
     region_outdir <- file.path(region_info$dir, "annotation")
     dir.create(region_outdir, showWarnings = FALSE, recursive = TRUE)
@@ -715,7 +716,7 @@ annotate_proseg_seurat <- function(proseg_dir,
       # Quick check: load metadata only
       tmp <- readRDS(annotated_rds)
       if ("consensus_label" %in% colnames(tmp@meta.data)) {
-        log_msg("  Skipping — already annotated: ", annotated_rds)
+        cat("  Skipping — already annotated: ", annotated_rds)
         rm(tmp); gc(verbose = FALSE)
         return(NULL)
       }
@@ -726,9 +727,9 @@ annotate_proseg_seurat <- function(proseg_dir,
       xen <- readRDS(annotated_rds)
     }
     
-    log_msg("[LOAD] Loaded: ", ncol(xen), " cells, ", nrow(xen), " genes")
-    log_msg("[LOAD] Assays: ", paste(Assays(xen), collapse = ", "))
-    log_msg("[LOAD] Default assay: ", DefaultAssay(xen))
+    cat("[LOAD] Loaded: ", ncol(xen), " cells, ", nrow(xen), " genes")
+    cat("[LOAD] Assays: ", paste(Assays(xen), collapse = ", "))
+    cat("[LOAD] Default assay: ", DefaultAssay(xen))
     
     # --- Prepare RNA assay for annotation methods ---
     # SCTransform was run during build; switch back to RNA for annotation.
@@ -744,14 +745,14 @@ annotate_proseg_seurat <- function(proseg_dir,
     # If data layer is identical to counts, normalization hasn't been done
     if (identical(rna_counts[1:min(100, nrow(rna_counts)), 1:min(10, ncol(rna_counts))],
                   rna_data[1:min(100, nrow(rna_counts)), 1:min(10, ncol(rna_counts))])) {
-      log_msg("[NORM] Log-normalizing RNA assay for SingleR...")
+      cat("[NORM] Log-normalizing RNA assay for SingleR...")
       xen <- NormalizeData(xen, assay = "RNA", verbose = FALSE)
     } else {
-      log_msg("[NORM] RNA data layer already log-normalized.")
+      cat("[NORM] RNA data layer already log-normalized.")
     }
     
     # --- SingleR ---
-    log_msg("[SINGLER] Classifying ", ncol(xen), " cells...")
+    cat("[SINGLER] Classifying ", ncol(xen), " cells...")
     
     xen_sce <- as.SingleCellExperiment(xen, assay = "RNA")
     if (!"logcounts" %in% assayNames(xen_sce)) {
@@ -763,12 +764,12 @@ annotate_proseg_seurat <- function(proseg_dir,
     shared <- intersect(train_genes, test_genes)
     missing_in_test <- setdiff(train_genes, test_genes)
     
-    log_msg("[SINGLER] Trained on: ", length(train_genes),
+    cat("[SINGLER] Trained on: ", length(train_genes),
             " | This region: ", length(test_genes),
             " | Shared: ", length(shared))
     
     if (length(missing_in_test) > 0) {
-      log_msg("[SINGLER] Padding ", length(missing_in_test), " absent genes")
+      cat("[SINGLER] Padding ", length(missing_in_test), " absent genes")
       zero_mat <- Matrix(0, nrow = length(missing_in_test), ncol = ncol(xen_sce),
                          sparse = TRUE,
                          dimnames = list(missing_in_test, colnames(xen_sce)))
@@ -803,15 +804,15 @@ annotate_proseg_seurat <- function(proseg_dir,
       FUN = function(x) rank(x) / length(x)
     )
     
-    log_msg("[SINGLER] Complete. ", sum(is.na(xen$singler_pruned)), " cells pruned.")
+    cat("[SINGLER] Complete. ", sum(is.na(xen$singler_pruned)), " cells pruned.")
     saveRDS(singler_results, file.path(region_outdir, "singler_raw_results.rds"))
     rm(xen_sce, singler_results); gc(verbose = FALSE)
     
     # --- RCTD ---
-    log_msg("[RCTD] Running doublet-mode deconvolution...")
+    cat("[RCTD] Running doublet-mode deconvolution...")
     
     common_genes <- intersect(rownames(xen), rownames(rctd_ref$counts))
-    log_msg("[RCTD] Gene intersection: ", length(common_genes), " genes")
+    cat("[RCTD] Gene intersection: ", length(common_genes), " genes")
     
     # RCTD needs raw counts from RNA assay
     spatial_counts <- GetAssayData(xen, assay = "RNA", layer = "counts")[common_genes, ]
@@ -889,7 +890,7 @@ annotate_proseg_seurat <- function(proseg_dir,
     gc(verbose = FALSE)
     
     # --- Consensus ---
-    log_msg("[CONSENSUS] Applying dual-method confidence filter...")
+    cat("[CONSENSUS] Applying dual-method confidence filter...")
     
     singler_pass <- (
       !is.na(xen$singler_pruned) &
@@ -941,11 +942,11 @@ annotate_proseg_seurat <- function(proseg_dir,
     n_total     <- ncol(xen)
     n_consensus <- sum(!is.na(xen$consensus_label))
     pct         <- round(100 * n_consensus / n_total, 1)
-    log_msg("[CONSENSUS] ", region_name, ": ", n_consensus, "/", n_total,
+    cat("[CONSENSUS] ", region_name, ": ", n_consensus, "/", n_total,
             " (", pct, "%) consensus labeled")
     
     # --- Exports ---
-    log_msg("[EXPORT] Writing tables...")
+    cat("[EXPORT] Writing tables...")
     
     export_cols <- intersect(
       c("consensus_label", "unlabeled_reason",
@@ -983,7 +984,7 @@ annotate_proseg_seurat <- function(proseg_dir,
     }
     
     # --- Diagnostic plots ---
-    log_msg("[DIAG] Generating plots...")
+    cat("[DIAG] Generating plots...")
     
     has_coords <- cx %in% colnames(xen@meta.data) && cy %in% colnames(xen@meta.data)
     
@@ -1043,7 +1044,7 @@ annotate_proseg_seurat <- function(proseg_dir,
     # Restore default assay to SCT for downstream use
     DefaultAssay(xen) <- "SCT"
     saveRDS(xen, annotated_rds)
-    log_msg("[DONE] ", region_name, " -> ", annotated_rds, "\n")
+    cat("[DONE] ", region_name, " -> ", annotated_rds, "\n")
     
     return(xen)
   }
@@ -1052,9 +1053,9 @@ annotate_proseg_seurat <- function(proseg_dir,
   # RUN ALL REGIONS
   # ============================================================================
   
-  log_msg("================================================================")
-  log_msg(" Annotating ", length(regions), " Xenium regions")
-  log_msg("================================================================")
+  cat("================================================================")
+  cat(" Annotating ", length(regions), " Xenium regions")
+  cat("================================================================")
   
   annotated <- mapply(
     annotate_region,
@@ -1070,9 +1071,9 @@ annotate_proseg_seurat <- function(proseg_dir,
   # ============================================================================
   
   if (length(annotated) > 0) {
-    log_msg("================================================================")
-    log_msg(" GLOBAL SUMMARY")
-    log_msg("================================================================\n")
+    cat("================================================================")
+    cat(" GLOBAL SUMMARY")
+    cat("================================================================\n")
     
     summary_df <- do.call(rbind, lapply(names(annotated), function(nm) {
       obj <- annotated[[nm]]
@@ -1094,13 +1095,13 @@ annotate_proseg_seurat <- function(proseg_dir,
     
     for (i in seq_len(nrow(summary_df))) {
       r <- summary_df[i, ]
-      log_msg("  ", r$region, ": ", r$consensus, "/", r$total_cells,
+      cat("  ", r$region, ": ", r$consensus, "/", r$total_cells,
               " (", r$pct_consensus, "%) consensus, ",
               r$n_types, " types")
     }
   }
   
-  log_msg("\nAnnotation complete.")
+  cat("\nAnnotation complete.")
   invisible(annotated)
 }
 
