@@ -317,7 +317,7 @@ attach_xenium_nuclei <- function(seu,
 
 
 ################################################################################
-# CONVENIENCE: Full proseg load in one call
+# CONVENIENCE: Full proseg load in one call - For segmentation comparison
 ################################################################################
 
 load_proseg_full <- function(h5ad_path,
@@ -346,6 +346,763 @@ load_proseg_full <- function(h5ad_path,
   return(seu)
 }
 
+################################################################################
+# LOAD AND OUTPUT A PREFORMATTED SEURAT.RDS AFTER PROSEG COMPUTATION
+################################################################################
+
+build_proseg_seurat <- function(proseg_dir,
+                                xenium_dir,
+                                resolution = 0.7,
+                                npcs       = 30,
+                                umap_dims  = 1:20,
+                                overwrite  = FALSE) {
+  
+  # Discover all zarr outputs
+  zarr_hits <- list.files(
+    proseg_dir,
+    pattern      = "^proseg-output\\.zarr$",
+    recursive    = TRUE,
+    full.names   = TRUE,
+    include.dirs = TRUE
+  )
+  
+  # zarr sits directly in <proseg_dir>/<sample>/proseg-output.zarr
+  sample_dirs <- unique(dirname(zarr_hits))
+  
+  if (length(sample_dirs) == 0) {
+    stop("No proseg-output.zarr found under: ", proseg_dir)
+  }
+  
+  cat("Found", length(sample_dirs), "sample(s)\n")
+  
+  for (sample_dir in sample_dirs) {
+    
+    sample_name <- basename(sample_dir)
+    rds_path    <- file.path(sample_dir, paste0(sample_name, "_proseg_seurat.rds"))
+    
+    cat("\n========================================\n")
+    cat("Sample:", sample_name, "\n")
+    cat("========================================\n")
+    
+    if (!overwrite && file.exists(rds_path)) {
+      cat("  Skipping — RDS already exists:", rds_path, "\n")
+      next
+    }
+    
+    zarr_path      <- file.path(sample_dir, "proseg-output.zarr")
+    xenium_sample  <- file.path(xenium_dir, sample_name)
+    
+    # --- Validate ---
+    if (!dir.exists(xenium_sample)) {
+      warning(sample_name, ": xenium dir not found at ", xenium_sample, " — skipping.")
+      next
+    }
+    
+    # --- Python: zarr -> h5ad + vertex CSV ---
+    cat("  Converting zarr to h5ad...\n")
+    zconv$convert(
+      zarr_path  = zarr_path,
+      output_dir = sample_dir
+    )
+    
+    h5ad_path      <- file.path(sample_dir, "proseg-anndata.h5ad")
+    vertices_path  <- file.path(sample_dir, "proseg-seg-vertices.csv.gz")
+    centroids_path <- file.path(sample_dir, "proseg-centroids.csv.gz")
+    
+    missing <- c(h5ad_path, vertices_path, centroids_path)
+    missing <- missing[!file.exists(missing)]
+    if (length(missing) > 0) {
+      warning(sample_name, ": conversion produced missing files — skipping.\n",
+              paste("  ", missing, collapse = "\n"))
+      next
+    }
+    
+    # --- Build Seurat with dual FOVs ---
+    cat("  Building Seurat object...\n")
+    obj <- load_proseg_full(
+      h5ad_path          = h5ad_path,
+      vertices_csv_path  = vertices_path,
+      centroids_csv_path = centroids_path,
+      xenium_dir         = xenium_sample,
+      proseg_fov_name    = "proseg",
+      xenium_fov_name    = "xenium"
+    )
+    
+    obj <- subset(obj, subset = nCount_RNA > 0)
+    
+    cat("  Cells after subset:", ncol(obj), "\n")
+    cat("  FOV proseg cells:",  length(Cells(obj[["proseg"]])), "\n")
+    cat("  FOV xenium cells:",  length(Cells(obj[["xenium"]])), "\n")
+    
+    proseg_fov_cells <- Cells(obj[["proseg"]], boundary = "centroids")
+    xenium_fov_cells <- Cells(obj[["xenium"]], boundary = "centroids")
+    cat("  proseg FOV cells in Seurat:",
+        sum(proseg_fov_cells %in% colnames(obj)), "/",
+        length(proseg_fov_cells), "\n")
+    cat("  xenium FOV cells in Seurat:",
+        sum(xenium_fov_cells %in% colnames(obj)), "/",
+        length(xenium_fov_cells), "\n")
+    
+    # --- Standard Seurat v5 workflow ---
+    cat("  Running SCTransform...\n")
+    obj <- SCTransform(obj, assay = "RNA", return.only.var.genes = FALSE)
+    
+    cat("  Running PCA...\n")
+    obj <- RunPCA(obj, npcs = npcs, features = rownames(obj))
+    
+    cat("  Running UMAP...\n")
+    obj <- RunUMAP(obj, dims = umap_dims)
+    
+    cat("  Clustering...\n")
+    obj <- FindNeighbors(obj, reduction = "pca", dims = 1:npcs)
+    obj <- FindClusters(obj, resolution = resolution)
+    
+    # --- Save ---
+    saveRDS(obj, file = rds_path)
+    cat("  Saved:", rds_path, "\n")
+    
+    rm(obj)
+    gc()
+  }
+}
+
+###############################################################################
+# ANNOTATE PROSEG-SEURAT OBJECT BASED ON REFERENCE MODEL
+###############################################################################
+
+# CALL WITH SOURCE() AND RUN WITH:
+# annotate_proseg_seurat(
+#   proseg_dir    = "./proseg_results",
+#   xenium_dir    = "/mnt/d/HYMS/chronic_wounds",
+#   reference_dir = "./reference"
+# )
+
+
+annotate_proseg_seurat <- function(proseg_dir,
+                                   reference_dir,
+                                   # QC (already applied in build, but safety net)
+                                   xen_min_features = 1,
+                                   xen_min_counts   = 10,
+                                   coord_x          = "x",
+                                   coord_y          = "y",
+                                   # SingleR
+                                   singler_quantile  = 0.8,
+                                   singler_fine_tune = TRUE,
+                                   singler_de_method = "wilcox",
+                                   # RCTD
+                                   rctd_mode              = "doublet",
+                                   rctd_max_cores         = 8,
+                                   rctd_gene_cutoff       = 0.000125,
+                                   rctd_fc_cutoff         = 0.5,
+                                   rctd_fc_cutoff_reg     = 0.75,
+                                   rctd_UMI_min           = 0,
+                                   rctd_counts_MIN        = 0,
+                                   rctd_CELL_MIN_INSTANCE = 10,
+                                   # Consensus
+                                   singler_delta_floor            = 0.05,
+                                   singler_delta_pctile_threshold = 0.95,
+                                   rctd_weight_threshold          = 0.70,
+                                   rctd_confident_classes         = c("singlet", "doublet_certain"),
+                                   # Caching
+                                   use_cache = TRUE,
+                                   overwrite = FALSE) {
+  
+  config <- as.list(environment())
+  config <- config[!names(config) %in% c("proseg_dir", "reference_dir", "overwrite")]
+  
+  # ============================================================================
+  # DISCOVER BUILT SEURAT OBJECTS
+  # ============================================================================
+  
+  log_msg("================================================================")
+  log_msg(" Discovering built Seurat objects in: ", proseg_dir)
+  log_msg("================================================================\n")
+  
+  rds_hits <- list.files(
+    proseg_dir,
+    pattern    = "_proseg_seurat\\.rds$",
+    recursive  = TRUE,
+    full.names = TRUE
+  )
+  
+  if (length(rds_hits) == 0) {
+    stop("[ERROR] No *_proseg_seurat.rds files found under: ", proseg_dir,
+         "\n  Run build_proseg_seurat() first.")
+  }
+  
+  # Derive region name and directory from each RDS path
+  regions <- list()
+  for (rds_path in rds_hits) {
+    sample_dir  <- dirname(rds_path)
+    region_name <- basename(sample_dir)
+    regions[[region_name]] <- list(
+      dir      = sample_dir,
+      rds_path = rds_path
+    )
+    log_msg("  Found: ", region_name, " -> ", rds_path)
+  }
+  
+  log_msg("\nDiscovered ", length(regions), " regions: ",
+          paste(names(regions), collapse = ", "), "\n")
+  
+  # ============================================================================
+  # PANEL GENES (union of rownames across all built objects)
+  # ============================================================================
+  
+  log_msg("================================================================")
+  log_msg(" Discovering Xenium panel genes")
+  log_msg("================================================================\n")
+  
+  # Use gene-metadata.csv.gz if available (lightweight), fall back to loading RDS
+  panel_genes <- character(0)
+  for (nm in names(regions)) {
+    gm_path <- file.path(regions[[nm]]$dir, "gene-metadata.csv.gz")
+    if (file.exists(gm_path)) {
+      gm <- fread(gm_path)
+      region_genes <- gm$gene
+    } else {
+      log_msg("  ", nm, ": gene-metadata.csv.gz not found, reading RDS header...")
+      tmp <- readRDS(regions[[nm]]$rds_path)
+      region_genes <- rownames(tmp)
+      rm(tmp); gc(verbose = FALSE)
+    }
+    log_msg("  ", nm, ": ", length(region_genes), " genes")
+    panel_genes <- union(panel_genes, region_genes)
+  }
+  
+  panel_genes <- sort(unique(panel_genes))
+  log_msg("\nPanel gene union: ", length(panel_genes), " genes\n")
+  
+  # ============================================================================
+  # REFERENCE + PANEL-SPECIFIC TRAINING
+  # ============================================================================
+  
+  log_msg("================================================================")
+  log_msg(" Building panel-specific reference models")
+  log_msg("================================================================\n")
+  
+  cache_singler <- file.path(proseg_dir, "singler_trained_panel.rds")
+  cache_rctd    <- file.path(proseg_dir, "rctd_reference_panel.rds")
+  cache_genes   <- file.path(proseg_dir, "panel_genes.txt")
+  
+  use_cached <- FALSE
+  if (config$use_cache &&
+      file.exists(cache_singler) &&
+      file.exists(cache_rctd) &&
+      file.exists(cache_genes)) {
+    cached_genes <- readLines(cache_genes)
+    if (identical(sort(cached_genes), sort(panel_genes))) {
+      log_msg("[CACHE] Panel genes match cached models. Loading from cache.")
+      use_cached <- TRUE
+    } else {
+      log_msg("[CACHE] Panel genes changed. Retraining.")
+    }
+  }
+  
+  if (use_cached) {
+    
+    singler_trained <- readRDS(cache_singler)
+    log_msg("[CACHE] SingleR panel model loaded.")
+    rctd_ref <- readRDS(cache_rctd)
+    log_msg("[CACHE] RCTD panel components loaded.\n")
+    
+  } else {
+    
+    ref_path <- file.path(reference_dir, "consensus_reference.rds")
+    log_msg("[REF] Loading full reference: ", ref_path)
+    ref_obj <- readRDS(ref_path)
+    log_msg("[REF] Full reference: ", ncol(ref_obj), " cells, ",
+            nrow(ref_obj), " genes, ",
+            length(unique(ref_obj$consensus_label)), " types")
+    
+    shared_genes <- intersect(rownames(ref_obj), panel_genes)
+    panel_only   <- setdiff(panel_genes, rownames(ref_obj))
+    
+    log_msg("[REF] Panel genes in reference: ", length(shared_genes), " / ",
+            length(panel_genes))
+    if (length(panel_only) > 0) {
+      log_msg("[REF] Panel genes NOT in reference (", length(panel_only),
+              "): ", paste(head(panel_only, 20), collapse = ", "),
+              if (length(panel_only) > 20) " ..." else "")
+    }
+    if (length(shared_genes) < 50) {
+      stop("[ERROR] Only ", length(shared_genes),
+           " panel genes found in reference.")
+    }
+    
+    log_msg("[REF] Subsetting reference to ", length(shared_genes), " panel genes...")
+    ref_panel <- subset(ref_obj, features = shared_genes)
+    ref_panel <- ensure_clean_assay(ref_panel, "ref_panel")
+    ref_panel <- NormalizeData(ref_panel, verbose = FALSE)
+    rm(ref_obj); gc(verbose = FALSE)
+    
+    # Train SingleR
+    log_msg("[SINGLER] Training on ", length(shared_genes), " panel genes...")
+    ref_sce <- as.SingleCellExperiment(ref_panel)
+    if (!"logcounts" %in% assayNames(ref_sce)) {
+      logcounts(ref_sce) <- GetAssayData(ref_panel, assay = "RNA", layer = "data")
+    }
+    
+    singler_trained <- trainSingleR(
+      ref       = ref_sce,
+      labels    = ref_sce$consensus_label,
+      de.method = config$singler_de_method,
+      BPPARAM   = MulticoreParam(config$rctd_max_cores)
+    )
+    log_msg("[SINGLER] Training complete.")
+    saveRDS(singler_trained, cache_singler)
+    rm(ref_sce); gc(verbose = FALSE)
+    
+    # Build RCTD components
+    log_msg("[RCTD] Building panel-gene reference components...")
+    ref_counts <- GetAssayData(ref_panel, assay = "RNA", layer = "counts")
+    ref_types  <- setNames(factor(ref_panel$consensus_label), colnames(ref_panel))
+    ref_numi   <- setNames(colSums(ref_counts), colnames(ref_panel))
+    
+    rctd_ref <- list(
+      counts     = ref_counts,
+      cell_types = ref_types,
+      nUMI       = ref_numi
+    )
+    
+    log_msg("[RCTD] Panel reference: ", ncol(ref_counts), " cells, ",
+            nrow(ref_counts), " genes, ",
+            length(levels(ref_types)), " types")
+    saveRDS(rctd_ref, cache_rctd)
+    writeLines(panel_genes, cache_genes)
+    rm(ref_panel, ref_counts); gc(verbose = FALSE)
+  }
+  
+  # RCTD drop warning
+  ref_type_counts <- table(rctd_ref$cell_types)
+  rctd_would_drop <- names(ref_type_counts[ref_type_counts < config$rctd_CELL_MIN_INSTANCE])
+  if (length(rctd_would_drop) > 0) {
+    log_msg("[WARN] RCTD CELL_MIN_INSTANCE = ", config$rctd_CELL_MIN_INSTANCE,
+            " will drop ", length(rctd_would_drop), " types: ",
+            paste(rctd_would_drop, collapse = ", "))
+  }
+  
+  # ============================================================================
+  # HELPER
+  # ============================================================================
+  
+  resolve_coord_col <- function(meta_colnames, preferred, alternatives) {
+    if (preferred %in% meta_colnames) return(preferred)
+    for (alt in alternatives) {
+      if (alt %in% meta_colnames) return(alt)
+    }
+    return(preferred)
+  }
+  
+  # ============================================================================
+  # PER-REGION ANNOTATION
+  # ============================================================================
+  
+  annotate_region <- function(region_name, region_info) {
+    
+    log_msg("\n========================================")
+    log_msg(" REGION: ", region_name)
+    log_msg("========================================\n")
+    
+    region_outdir <- file.path(region_info$dir, "annotation")
+    dir.create(region_outdir, showWarnings = FALSE, recursive = TRUE)
+    
+    # Output: overwrite the original RDS with annotations added
+    annotated_rds <- region_info$rds_path
+    
+    # Check for existing annotation (look for consensus_label column)
+    if (!overwrite) {
+      # Quick check: load metadata only
+      tmp <- readRDS(annotated_rds)
+      if ("consensus_label" %in% colnames(tmp@meta.data)) {
+        log_msg("  Skipping — already annotated: ", annotated_rds)
+        rm(tmp); gc(verbose = FALSE)
+        return(NULL)
+      }
+      # Not annotated yet, keep the loaded object
+      xen <- tmp
+      rm(tmp)
+    } else {
+      xen <- readRDS(annotated_rds)
+    }
+    
+    log_msg("[LOAD] Loaded: ", ncol(xen), " cells, ", nrow(xen), " genes")
+    log_msg("[LOAD] Assays: ", paste(Assays(xen), collapse = ", "))
+    log_msg("[LOAD] Default assay: ", DefaultAssay(xen))
+    
+    # --- Prepare RNA assay for annotation methods ---
+    # SCTransform was run during build; switch back to RNA for annotation.
+    # SingleR needs log-normalized counts; RCTD needs raw counts.
+    # Both come from the RNA assay.
+    DefaultAssay(xen) <- "RNA"
+    
+    # Check if RNA data layer already has log-normalized values
+    # If not, run NormalizeData on the RNA assay
+    rna_counts <- GetAssayData(xen, assay = "RNA", layer = "counts")
+    rna_data   <- GetAssayData(xen, assay = "RNA", layer = "data")
+    
+    # If data layer is identical to counts, normalization hasn't been done
+    if (identical(rna_counts[1:min(100, nrow(rna_counts)), 1:min(10, ncol(rna_counts))],
+                  rna_data[1:min(100, nrow(rna_counts)), 1:min(10, ncol(rna_counts))])) {
+      log_msg("[NORM] Log-normalizing RNA assay for SingleR...")
+      xen <- NormalizeData(xen, assay = "RNA", verbose = FALSE)
+    } else {
+      log_msg("[NORM] RNA data layer already log-normalized.")
+    }
+    
+    # --- SingleR ---
+    log_msg("[SINGLER] Classifying ", ncol(xen), " cells...")
+    
+    xen_sce <- as.SingleCellExperiment(xen, assay = "RNA")
+    if (!"logcounts" %in% assayNames(xen_sce)) {
+      logcounts(xen_sce) <- GetAssayData(xen, assay = "RNA", layer = "data")
+    }
+    
+    test_genes  <- rownames(xen_sce)
+    train_genes <- rownames(singler_trained$ref)
+    shared <- intersect(train_genes, test_genes)
+    missing_in_test <- setdiff(train_genes, test_genes)
+    
+    log_msg("[SINGLER] Trained on: ", length(train_genes),
+            " | This region: ", length(test_genes),
+            " | Shared: ", length(shared))
+    
+    if (length(missing_in_test) > 0) {
+      log_msg("[SINGLER] Padding ", length(missing_in_test), " absent genes")
+      zero_mat <- Matrix(0, nrow = length(missing_in_test), ncol = ncol(xen_sce),
+                         sparse = TRUE,
+                         dimnames = list(missing_in_test, colnames(xen_sce)))
+      logcounts(xen_sce) <- rbind(logcounts(xen_sce), zero_mat)[train_genes, ]
+      if ("counts" %in% assayNames(xen_sce)) {
+        zero_counts <- Matrix(0, nrow = length(missing_in_test), ncol = ncol(xen_sce),
+                              sparse = TRUE,
+                              dimnames = list(missing_in_test, colnames(xen_sce)))
+        counts(xen_sce) <- rbind(counts(xen_sce), zero_counts)[train_genes, ]
+      }
+    } else {
+      logcounts(xen_sce) <- logcounts(xen_sce)[train_genes, ]
+      if ("counts" %in% assayNames(xen_sce)) {
+        counts(xen_sce) <- counts(xen_sce)[train_genes, ]
+      }
+    }
+    
+    singler_results <- classifySingleR(
+      test      = xen_sce,
+      trained   = singler_trained,
+      quantile  = config$singler_quantile,
+      fine.tune = config$singler_fine_tune,
+      BPPARAM   = MulticoreParam(config$rctd_max_cores)
+    )
+    
+    xen$singler_label      <- singler_results$labels
+    xen$singler_pruned     <- singler_results$pruned.labels
+    xen$singler_delta_next <- singler_results$delta.next
+    xen$singler_max_score  <- apply(singler_results$scores, 1, max)
+    xen$singler_delta_pctile <- ave(
+      xen$singler_delta_next, xen$singler_label,
+      FUN = function(x) rank(x) / length(x)
+    )
+    
+    log_msg("[SINGLER] Complete. ", sum(is.na(xen$singler_pruned)), " cells pruned.")
+    saveRDS(singler_results, file.path(region_outdir, "singler_raw_results.rds"))
+    rm(xen_sce, singler_results); gc(verbose = FALSE)
+    
+    # --- RCTD ---
+    log_msg("[RCTD] Running doublet-mode deconvolution...")
+    
+    common_genes <- intersect(rownames(xen), rownames(rctd_ref$counts))
+    log_msg("[RCTD] Gene intersection: ", length(common_genes), " genes")
+    
+    # RCTD needs raw counts from RNA assay
+    spatial_counts <- GetAssayData(xen, assay = "RNA", layer = "counts")[common_genes, ]
+    
+    cx <- resolve_coord_col(colnames(xen@meta.data), config$coord_x,
+                            c("x_centroid", "X", "centroid_x"))
+    cy <- resolve_coord_col(colnames(xen@meta.data), config$coord_y,
+                            c("y_centroid", "Y", "centroid_y"))
+    
+    if (!(cx %in% colnames(xen@meta.data))) stop("[ERROR] Cannot find x-coordinate column.")
+    if (!(cy %in% colnames(xen@meta.data))) stop("[ERROR] Cannot find y-coordinate column.")
+    
+    coords <- data.frame(
+      x = xen@meta.data[[cx]],
+      y = xen@meta.data[[cy]],
+      row.names = colnames(xen)
+    )
+    
+    ref_rctd_obj <- Reference(
+      counts     = rctd_ref$counts[common_genes, ],
+      cell_types = rctd_ref$cell_types,
+      nUMI       = rctd_ref$nUMI
+    )
+    
+    query_rctd <- SpatialRNA(
+      coords = coords,
+      counts = spatial_counts,
+      nUMI   = setNames(colSums(spatial_counts), colnames(spatial_counts))
+    )
+    
+    rctd_obj <- create.RCTD(
+      spatialRNA        = query_rctd,
+      reference         = ref_rctd_obj,
+      max_cores         = config$rctd_max_cores,
+      gene_cutoff       = config$rctd_gene_cutoff,
+      fc_cutoff         = config$rctd_fc_cutoff,
+      fc_cutoff_reg     = config$rctd_fc_cutoff_reg,
+      UMI_min           = config$rctd_UMI_min,
+      counts_MIN        = config$rctd_counts_MIN,
+      CELL_MIN_INSTANCE = config$rctd_CELL_MIN_INSTANCE
+    )
+    
+    rctd_obj <- run.RCTD(rctd_obj, doublet_mode = config$rctd_mode)
+    
+    rctd_df      <- rctd_obj@results$results_df
+    rctd_weights <- rctd_obj@results$weights
+    rctd_cells   <- rownames(rctd_df)
+    
+    xen$rctd_spot_class   <- NA_character_
+    xen$rctd_first_type   <- NA_character_
+    xen$rctd_second_type  <- NA_character_
+    xen$rctd_first_weight <- NA_real_
+    
+    matching  <- intersect(colnames(xen), rctd_cells)
+    match_idx <- match(matching, colnames(xen))
+    
+    xen$rctd_spot_class[match_idx]  <- as.character(rctd_df[matching, "spot_class"])
+    xen$rctd_first_type[match_idx]  <- as.character(rctd_df[matching, "first_type"])
+    xen$rctd_second_type[match_idx] <- as.character(rctd_df[matching, "second_type"])
+    
+    if (!is.null(rctd_weights) && nrow(rctd_weights) > 0) {
+      weight_cells <- intersect(matching, rownames(rctd_weights))
+      if (length(weight_cells) > 0) {
+        first_types <- as.character(rctd_df[weight_cells, "first_type"])
+        valid <- first_types %in% colnames(rctd_weights)
+        if (any(valid)) {
+          vc <- weight_cells[valid]
+          ft <- first_types[valid]
+          xen$rctd_first_weight[match(vc, colnames(xen))] <- rctd_weights[cbind(vc, ft)]
+        }
+      }
+    }
+    
+    rm(rctd_obj, ref_rctd_obj, query_rctd, rctd_weights, rctd_df)
+    gc(verbose = FALSE)
+    
+    # --- Consensus ---
+    log_msg("[CONSENSUS] Applying dual-method confidence filter...")
+    
+    singler_pass <- (
+      !is.na(xen$singler_pruned) &
+        !is.na(xen$singler_delta_next) &
+        xen$singler_delta_next >= config$singler_delta_floor &
+        xen$singler_delta_pctile >= (1 - config$singler_delta_pctile_threshold)
+    )
+    singler_pass[is.na(singler_pass)] <- FALSE
+    
+    rctd_pass <- (
+      xen$rctd_spot_class %in% config$rctd_confident_classes &
+        !is.na(xen$rctd_first_weight) &
+        xen$rctd_first_weight >= config$rctd_weight_threshold
+    )
+    rctd_pass[is.na(rctd_pass)] <- FALSE
+    
+    labels_agree <- (!is.na(xen$singler_label) &
+                       !is.na(xen$rctd_first_type) &
+                       xen$singler_label == xen$rctd_first_type)
+    labels_agree[is.na(labels_agree)] <- FALSE
+    
+    consensus_pass <- labels_agree & singler_pass & rctd_pass
+    xen$consensus_label <- ifelse(consensus_pass, xen$singler_label, NA_character_)
+    
+    idx <- !consensus_pass
+    xen$unlabeled_reason <- NA_character_
+    if (any(idx)) {
+      xen$unlabeled_reason[idx] <- case_when(
+        is.na(xen$rctd_first_type[idx])
+        ~ "rctd_dropped",
+        labels_agree[idx] & !singler_pass[idx] & !rctd_pass[idx]
+        ~ "agree_both_low_confidence",
+        labels_agree[idx] & !singler_pass[idx] & rctd_pass[idx]
+        ~ "agree_singler_low_confidence",
+        labels_agree[idx] & singler_pass[idx] & !rctd_pass[idx]
+        ~ "agree_rctd_low_confidence",
+        !labels_agree[idx] & singler_pass[idx] & rctd_pass[idx]
+        ~ "disagree_both_confident",
+        !labels_agree[idx] & !singler_pass[idx] & !rctd_pass[idx]
+        ~ "disagree_both_low_confidence",
+        !labels_agree[idx] & singler_pass[idx] & !rctd_pass[idx]
+        ~ "disagree_only_singler_confident",
+        !labels_agree[idx] & !singler_pass[idx] & rctd_pass[idx]
+        ~ "disagree_only_rctd_confident",
+        TRUE ~ "other"
+      )
+    }
+    
+    n_total     <- ncol(xen)
+    n_consensus <- sum(!is.na(xen$consensus_label))
+    pct         <- round(100 * n_consensus / n_total, 1)
+    log_msg("[CONSENSUS] ", region_name, ": ", n_consensus, "/", n_total,
+            " (", pct, "%) consensus labeled")
+    
+    # --- Exports ---
+    log_msg("[EXPORT] Writing tables...")
+    
+    export_cols <- intersect(
+      c("consensus_label", "unlabeled_reason",
+        "singler_label", "singler_pruned", "singler_delta_next",
+        "singler_delta_pctile", "singler_max_score",
+        "rctd_spot_class", "rctd_first_type", "rctd_second_type",
+        "rctd_first_weight",
+        "nCount_RNA", "nFeature_RNA", cx, cy),
+      colnames(xen@meta.data)
+    )
+    
+    fwrite(xen@meta.data[, export_cols, drop = FALSE],
+           file.path(region_outdir, "all_cells_annotation.csv.gz"))
+    
+    unlabeled_mask <- is.na(xen$consensus_label)
+    if (any(unlabeled_mask)) {
+      fwrite(xen@meta.data[unlabeled_mask, export_cols, drop = FALSE],
+             file.path(region_outdir, "unlabeled_cells.csv.gz"))
+    }
+    
+    confusion <- table(SingleR = xen$singler_label,
+                       RCTD = xen$rctd_first_type, useNA = "ifany")
+    fwrite(as.data.frame.matrix(confusion),
+           file.path(region_outdir, "singler_vs_rctd_confusion.csv"),
+           row.names = TRUE)
+    
+    disagree_mask <- !labels_agree & !is.na(xen$singler_label) &
+      !is.na(xen$rctd_first_type)
+    if (any(disagree_mask)) {
+      dtab <- table(SingleR = xen$singler_label[disagree_mask],
+                    RCTD = xen$rctd_first_type[disagree_mask])
+      fwrite(as.data.frame.matrix(dtab),
+             file.path(region_outdir, "disagreement_matrix.csv"),
+             row.names = TRUE)
+    }
+    
+    # --- Diagnostic plots ---
+    log_msg("[DIAG] Generating plots...")
+    
+    has_coords <- cx %in% colnames(xen@meta.data) && cy %in% colnames(xen@meta.data)
+    
+    if (has_coords) {
+      plot_df <- data.frame(
+        x = xen@meta.data[[cx]], y = xen@meta.data[[cy]],
+        label = ifelse(is.na(xen$consensus_label), "Unlabeled", xen$consensus_label),
+        reason = xen$unlabeled_reason, stringsAsFactors = FALSE
+      )
+      
+      p1 <- ggplot(plot_df, aes(x, y, color = label)) +
+        geom_point(size = 0.1, alpha = 0.5) +
+        coord_fixed() + theme_minimal(base_size = 10) +
+        ggtitle(paste(region_name, "-- Consensus labels")) +
+        theme(legend.key.size = unit(0.3, "cm"))
+      ggsave(file.path(region_outdir, "spatial_consensus.pdf"),
+             p1, width = 14, height = 10)
+      
+      unlabeled_df <- plot_df[plot_df$label == "Unlabeled", ]
+      if (nrow(unlabeled_df) > 0) {
+        p2 <- ggplot(unlabeled_df, aes(x, y, color = reason)) +
+          geom_point(size = 0.2, alpha = 0.6) +
+          coord_fixed() + theme_minimal(base_size = 10) +
+          ggtitle(paste(region_name, "-- Unlabeled: reason codes"))
+        ggsave(file.path(region_outdir, "spatial_unlabeled_reasons.pdf"),
+               p2, width = 14, height = 10)
+      }
+    }
+    
+    p3 <- ggplot(xen@meta.data, aes(x = singler_label, y = singler_delta_next)) +
+      geom_violin(fill = "lightblue", alpha = 0.4, scale = "width") +
+      geom_jitter(aes(color = ifelse(is.na(consensus_label), "Unlabeled", "Labeled")),
+                  size = 0.05, alpha = 0.2, width = 0.2) +
+      scale_color_manual(values = c(Labeled = "grey30", Unlabeled = "red")) +
+      geom_hline(yintercept = config$singler_delta_floor, lty = 2, color = "darkred") +
+      coord_flip() + theme_minimal(base_size = 9) +
+      ggtitle(paste(region_name, "-- SingleR delta.next by label"))
+    ggsave(file.path(region_outdir, "singler_delta_distribution.pdf"),
+           p3, width = 10, height = max(6, 0.4 * length(unique(xen$singler_label))))
+    
+    p4 <- ggplot(xen@meta.data, aes(x = singler_delta_next, y = rctd_first_weight)) +
+      geom_point(aes(color = ifelse(is.na(consensus_label), "Unlabeled", "Labeled")),
+                 size = 0.15, alpha = 0.2) +
+      scale_color_manual(values = c(Labeled = "steelblue", Unlabeled = "red")) +
+      geom_hline(yintercept = config$rctd_weight_threshold, lty = 2, color = "grey40") +
+      geom_vline(xintercept = config$singler_delta_floor, lty = 2, color = "grey40") +
+      annotate("rect",
+               xmin = config$singler_delta_floor, xmax = Inf,
+               ymin = config$rctd_weight_threshold, ymax = Inf,
+               fill = "steelblue", alpha = 0.05) +
+      theme_minimal(base_size = 10) +
+      ggtitle(paste(region_name, "-- Confidence space"))
+    ggsave(file.path(region_outdir, "confidence_scatter.pdf"),
+           p4, width = 8, height = 7)
+    
+    # --- Save annotated object back to the same RDS ---
+    # Restore default assay to SCT for downstream use
+    DefaultAssay(xen) <- "SCT"
+    saveRDS(xen, annotated_rds)
+    log_msg("[DONE] ", region_name, " -> ", annotated_rds, "\n")
+    
+    return(xen)
+  }
+  
+  # ============================================================================
+  # RUN ALL REGIONS
+  # ============================================================================
+  
+  log_msg("================================================================")
+  log_msg(" Annotating ", length(regions), " Xenium regions")
+  log_msg("================================================================")
+  
+  annotated <- mapply(
+    annotate_region,
+    region_name = names(regions),
+    region_info = regions,
+    SIMPLIFY = FALSE
+  )
+  
+  annotated <- Filter(Negate(is.null), annotated)
+  
+  # ============================================================================
+  # GLOBAL SUMMARY
+  # ============================================================================
+  
+  if (length(annotated) > 0) {
+    log_msg("================================================================")
+    log_msg(" GLOBAL SUMMARY")
+    log_msg("================================================================\n")
+    
+    summary_df <- do.call(rbind, lapply(names(annotated), function(nm) {
+      obj <- annotated[[nm]]
+      data.frame(
+        region        = nm,
+        total_cells   = ncol(obj),
+        consensus     = sum(!is.na(obj$consensus_label)),
+        unlabeled     = sum(is.na(obj$consensus_label)),
+        pct_consensus = round(100 * sum(!is.na(obj$consensus_label)) / ncol(obj), 1),
+        n_types       = length(unique(na.omit(obj$consensus_label))),
+        n_disagree_both_confident = sum(
+          obj$unlabeled_reason == "disagree_both_confident", na.rm = TRUE
+        ),
+        stringsAsFactors = FALSE
+      )
+    }))
+    
+    fwrite(summary_df, file.path(proseg_dir, "annotation_summary.csv"))
+    
+    for (i in seq_len(nrow(summary_df))) {
+      r <- summary_df[i, ]
+      log_msg("  ", r$region, ": ", r$consensus, "/", r$total_cells,
+              " (", r$pct_consensus, "%) consensus, ",
+              r$n_types, " types")
+    }
+  }
+  
+  log_msg("\nAnnotation complete.")
+  invisible(annotated)
+}
 
 ################################################################################
 # PLOTTING

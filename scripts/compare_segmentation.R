@@ -12,16 +12,16 @@ sys.path.append('./scripts')
 zconv <- reticulate::import("zarr_h5ad_conversion", convert = TRUE)
 
 zconv$convert(
-  zarr_path  = "./proseg_results/HS_Region_1/python/proseg-output.zarr",
-  output_dir = "./proseg_results/HS_Region_1/seurat_ready/"
+  zarr_path  = "./proseg_results/HS_Region_1/proseg-output.zarr",
+  output_dir = "./proseg_results/HS_Region_1/"
 )
 
 
 # ---- R: Build Seurat with native FOVs ----
 seurat_proseg <- load_proseg_full(
-  h5ad_path         = "./proseg_results/HS_Region_1/seurat_ready/proseg-anndata.h5ad",
-  vertices_csv_path = "./proseg_results/HS_Region_1/seurat_ready/proseg-seg-vertices.csv.gz",
-  centroids_csv_path = "./proseg_results/HS_Region_1/seurat_ready/proseg-centroids.csv.gz",
+  h5ad_path         = "./proseg_results/HS_Region_1/proseg-anndata.h5ad",
+  vertices_csv_path = "./proseg_results/HS_Region_1/proseg-seg-vertices.csv.gz",
+  centroids_csv_path = "./proseg_results/HS_Region_1/proseg-centroids.csv.gz",
   xenium_dir        = "/mnt/d/HYMS/chronic_wounds/HS_Region_1",
   proseg_fov_name   = "proseg",
   xenium_fov_name   = "xenium"
