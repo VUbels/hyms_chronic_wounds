@@ -28,9 +28,15 @@ Rscript ./scripts/reference_build.R
 ## Then to build the seurat objects with appropriate labeling run:
 ```
 Rscript ./scripts/prepare_objects.R
+Rscript ./scripts/convert_to_h5ad.R
 ```
+You now have fully annotated RDS and H5AD files.
 
-
+** To run niche identification run:
+```
+python3 ./scripts/run_nichecompass_integrated.py
+```
+This requires pytorch capability, ideally with GPU support.
 
 ## You can opt to look at the segmentation and troubleshoot yourselves by running 
 
