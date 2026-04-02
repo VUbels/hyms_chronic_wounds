@@ -38,9 +38,14 @@ library(sf)
 library(patchwork)
 library(viridis)
 library(BiocParallel) 
+library(ggpmisc)
+library(future)
+library(BPCells)
+
+options(future.globals.maxSize = 4 * 1024^3)
 
 ################################################################################
-# STEP 1: Load proseg h5ad -> Seurat object (counts + metadata, no FOV yet)
+# Load proseg h5ad -> Seurat object (counts + metadata, no FOV yet)
 ################################################################################
 
 load_proseg_h5ad <- function(h5ad_path) {
@@ -72,7 +77,7 @@ load_proseg_h5ad <- function(h5ad_path) {
 
 
 ################################################################################
-# STEP 2: Attach proseg segmentation as native FOV
+# Attach proseg segmentation as native FOV
 #
 # Reads the vertex CSV produced by proseg_to_seurat.py.
 # Format: x, y, cell (one row per vertex, cell name repeated).
@@ -107,10 +112,10 @@ attach_proseg_fov <- function(seu,
   n_cells_with_seg <- length(unique(vtx$cell))
   message("  ", nrow(vtx), " vertices for ", n_cells_with_seg, " cells")
   
-  # ---- Build Segmentation ----
+  # Build Segmentation
   seg <- CreateSegmentation(as.data.frame(vtx))
   
-  # ---- Build Centroids ----
+  # Build Centroids
   if (!is.null(centroids_csv_path) && file.exists(centroids_csv_path)) {
     message("Reading centroids: ", centroids_csv_path)
     cents_df <- fread(centroids_csv_path)
@@ -128,7 +133,7 @@ attach_proseg_fov <- function(seu,
   
   cents <- CreateCentroids(cents_df)
   
-  # ---- Build FOV ----
+  # Build FOV
   fov <- CreateFOV(
     coords = list("segmentation" = seg, "centroids" = cents),
     type   = c("segmentation", "centroids"),
@@ -149,7 +154,7 @@ attach_proseg_fov <- function(seu,
 
 
 ################################################################################
-# STEP 3: Attach Xenium boundaries as a native FOV
+# Attach Xenium boundaries as a native FOV
 #
 # Reads cell_boundaries.parquet from original Xenium output.
 # Converts to vertex data.frame and creates a proper FOV.
@@ -214,7 +219,7 @@ attach_xenium_fov <- function(seu,
   bdf$cell <- as.character(id_map[xenium_ids])
   bdf <- bdf[!is.na(bdf$cell), ]
   
-  # ---- Build vertex data.frame for CreateSegmentation ----
+  # Build vertex data.frame for CreateSegmentation
   vtx_df <- data.frame(
     x    = bdf$vertex_x,
     y    = bdf$vertex_y,
@@ -227,7 +232,7 @@ attach_xenium_fov <- function(seu,
   
   seg <- CreateSegmentation(vtx_df)
   
-  # ---- Build Centroids ----
+  # Build Centroids
   cells_parquet <- file.path(xenium_dir, "cells.parquet")
   if (file.exists(cells_parquet)) {
     cmeta <- read_parquet(cells_parquet)
@@ -257,7 +262,7 @@ attach_xenium_fov <- function(seu,
   
   cents <- CreateCentroids(cents_df)
   
-  # ---- Build FOV ----
+  # Build FOV
   fov <- CreateFOV(
     coords = list("segmentation" = seg, "centroids" = cents),
     type   = c("segmentation", "centroids"),
@@ -276,8 +281,8 @@ attach_xenium_fov <- function(seu,
 }
 
 
-################################################################################
-# STEP 3b: Attach Xenium nuclei as additional boundary within existing FOV
+###############################################################################
+# Attach Xenium nuclei as additional boundary within existing FOV
 ################################################################################
 
 attach_xenium_nuclei <- function(seu,
@@ -297,7 +302,7 @@ attach_xenium_nuclei <- function(seu,
   message("Reading Xenium nucleus boundaries...")
   bdf <- read_parquet(parquet_file)
   
-  # ---- Same cell name mapping as attach_xenium_fov ----
+  # Same cell name mapping as attach_xenium_fov
   seurat_names <- colnames(seu)
   xenium_ids <- as.character(bdf$cell_id)
   unique_xenium <- unique(xenium_ids)
@@ -406,13 +411,13 @@ build_proseg_seurat <- function(proseg_dir,
     zarr_path      <- file.path(sample_dir, "proseg-output.zarr")
     xenium_sample  <- file.path(xenium_dir, sample_name)
     
-    # --- Validate ---
+    # Validate 
     if (!dir.exists(xenium_sample)) {
       warning(sample_name, ": xenium dir not found at ", xenium_sample, " — skipping.")
       next
     }
     
-    # --- Python: zarr -> h5ad + vertex CSV ---
+    # Python: zarr -> h5ad + vertex CSV
     cat("  Converting zarr to h5ad...\n")
     zconv$convert(
       zarr_path  = zarr_path,
@@ -431,7 +436,7 @@ build_proseg_seurat <- function(proseg_dir,
       next
     }
     
-    # --- Build Seurat with dual FOVs ---
+    # Build Seurat with dual FOVs
     cat("  Building Seurat object...\n")
     obj <- load_proseg_full(
       h5ad_path          = h5ad_path,
@@ -457,21 +462,6 @@ build_proseg_seurat <- function(proseg_dir,
         sum(xenium_fov_cells %in% colnames(obj)), "/",
         length(xenium_fov_cells), "\n")
     
-    # --- Standard Seurat v5 workflow ---
-    cat("  Running SCTransform...\n")
-    obj <- SCTransform(obj, assay = "RNA", return.only.var.genes = FALSE)
-    
-    cat("  Running PCA...\n")
-    obj <- RunPCA(obj, npcs = npcs, features = rownames(obj))
-    
-    cat("  Running UMAP...\n")
-    obj <- RunUMAP(obj, dims = umap_dims)
-    
-    cat("  Clustering...\n")
-    obj <- FindNeighbors(obj, reduction = "pca", dims = 1:npcs)
-    obj <- FindClusters(obj, resolution = resolution)
-    
-    # --- Save ---
     saveRDS(obj, file = rds_path)
     cat("  Saved:", rds_path, "\n")
     
@@ -480,8 +470,501 @@ build_proseg_seurat <- function(proseg_dir,
   }
 }
 
+
+#######################################################################
+# SIMPLE ANNOTATION
+#######################################################################
+
+annotate_proseg_seurat_10x <- function(
+    proseg_dir = "./proseg_results",
+    reference_dir = "./reference",
+    ref_label_col = "CellType",
+    output_dir = "./annotated_data",
+    dims = 1:30,
+    k.weight = 50,
+    sketch_ncells = 15000,
+    plots = TRUE,
+    overwrite = TRUE
+) {
+  
+  library(Seurat)
+  library(SeuratObject)
+  library(BPCells)
+  library(data.table)
+  library(ggplot2)
+  library(cowplot)
+  library(gridExtra)
+  library(ggpmisc)
+  library(scales)
+  
+  ts <- function() format(Sys.time(), "[%Y-%m-%d %H:%M:%S]")
+  
+  # --- Stable colour map --------------------------------------------------
+  base_palette <- c(
+    "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00",
+    "#A65628", "#F781BF", "#999999", "#66C2A5", "#FC8D62",
+    "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494",
+    "#B3B3B3", "#1B9E77", "#D95F02", "#7570B3", "#E7298A",
+    "#66A61E", "#E6AB02", "#A6761D", "#666666", "#8DD3C7",
+    "#BEBADA", "#FB8072", "#80B1D3", "#FDB462", "#B3DE69"
+  )
+  
+  global_cmap <- list()
+  
+  assign_colours <- function(cell_types) {
+    all_types <- sort(unique(c(names(global_cmap), cell_types)))
+    for (ct in all_types) {
+      if (is.null(global_cmap[[ct]])) {
+        idx <- length(global_cmap) + 1
+        if (idx <= length(base_palette)) {
+          global_cmap[[ct]] <<- base_palette[idx]
+        } else {
+          global_cmap[[ct]] <<- hcl.colors(idx, palette = "Set 2")[idx]
+        }
+      }
+    }
+    return(unlist(global_cmap))
+  }
+  
+  cat(ts(), "============================================================\n")
+  cat(ts(), " 10X Xenium Annotation + Reference QC (Memory-Optimised)\n")
+  cat(ts(), "============================================================\n\n")
+  
+  ##########################################################################
+  # Discover regions
+  ##########################################################################
+  rds_hits <- list.files(
+    proseg_dir,
+    pattern = "_proseg_seurat\\.rds$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+  
+  if (length(rds_hits) == 0) stop("[ERROR] No *_proseg_seurat.rds found.")
+  
+  regions <- list()
+  for (p in rds_hits) {
+    nm <- basename(dirname(p))
+    regions[[nm]] <- list(rds_path = p)
+    cat(ts(), " Found:", nm, "\n")
+  }
+  
+  ##########################################################################
+  # Load reference — BPCells on-disk counts, then preprocess
+  ##########################################################################
+  ref_path <- file.path(reference_dir, "consensus_reference.rds")
+  cat(ts(), "[REF] Loading:", ref_path, "\n")
+  reference_obj <- readRDS(ref_path)
+  DefaultAssay(reference_obj) <- "RNA"
+  
+  bpcells_dir <- file.path(reference_dir, "ref_counts_bpcells")
+  if (!dir.exists(bpcells_dir)) {
+    cat(ts(), "[REF] Writing counts to disk (BPCells):", bpcells_dir, "\n")
+    write_matrix_dir(
+      mat = reference_obj[["RNA"]]$counts,
+      dir = bpcells_dir
+    )
+  } else {
+    cat(ts(), "[REF] BPCells cache found:", bpcells_dir, "\n")
+  }
+  
+  counts_on_disk <- open_matrix_dir(dir = bpcells_dir)
+  reference_obj[["RNA"]]$counts <- counts_on_disk
+  rm(counts_on_disk)
+  gc(verbose = FALSE)
+  
+  cat(ts(), "[REF] Counts now on-disk. Preprocessing...\n")
+  
+  reference_obj <- NormalizeData(reference_obj, verbose = FALSE)
+  reference_obj <- FindVariableFeatures(reference_obj, verbose = FALSE)
+  reference_obj <- ScaleData(reference_obj, verbose = FALSE)
+  reference_obj <- RunPCA(reference_obj, verbose = FALSE)
+  
+  reference_obj[["RNA"]]$scale.data <- NULL
+  gc(verbose = FALSE)
+  
+  cat(ts(), "[REF] Reference preprocessed. PCA stored; scale.data dropped.\n")
+  
+  ref_labels   <- reference_obj[[ref_label_col]][, 1]
+  ref_genes    <- rownames(reference_obj)
+  ref_metadata <- reference_obj@meta.data
+  
+  ##########################################################################
+  # Annotation with sketch workflow
+  #
+  # Strategy:
+  #   1. Write xenium counts to a temp BPCells dir (off-loads query RAM)
+  #   2. NormalizeData + FindVariableFeatures on full query
+  #   3. SketchData to get a small representative subset
+  #   4. FindTransferAnchors + TransferData on sketch only
+  #   5. TransferSketchLabels to project labels to all cells
+  #
+  # Returns a data.frame of predictions (original object not modified).
+  ##########################################################################
+  run_10x_annotation <- function(obj, region_name) {
+    
+    DefaultAssay(obj) <- "RNA"
+    
+    shared_genes <- intersect(rownames(obj), ref_genes)
+    if (length(shared_genes) < 50)
+      stop("[ERROR] Too few shared genes: ", length(shared_genes))
+    
+    n_cells <- ncol(obj)
+    cat(ts(), "  Shared genes:", length(shared_genes),
+        "| Cells:", n_cells, "\n")
+    
+    # Write xenium counts to disk via BPCells
+    query_bp_dir <- file.path(output_dir, ".bpcells_tmp", region_name)
+    dir.create(query_bp_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    write_matrix_dir(
+      mat = obj[["RNA"]]$counts,
+      dir = query_bp_dir,
+      overwrite = TRUE
+    )
+    obj[["RNA"]]$counts <- open_matrix_dir(dir = query_bp_dir)
+    gc(verbose = FALSE)
+    cat(ts(), "  Query counts written to disk\n")
+    
+    # Normalize + variable features on full query
+    obj <- NormalizeData(obj, verbose = FALSE)
+    obj <- FindVariableFeatures(obj, verbose = FALSE)
+    
+    # Sketch
+    use_sketch <- n_cells > sketch_ncells * 1.5
+    if (use_sketch) {
+      cat(ts(), "  Sketching", sketch_ncells, "cells from", n_cells, "...\n")
+      obj <- SketchData(
+        object          = obj,
+        ncells          = sketch_ncells,
+        method          = "LeverageScore",
+        sketched.assay  = "sketch",
+        verbose         = FALSE
+      )
+      DefaultAssay(obj) <- "sketch"
+      obj <- FindVariableFeatures(obj, verbose = FALSE)
+      obj <- ScaleData(obj, verbose = FALSE)
+      obj <- RunPCA(obj, npcs = min(max(dims), 50),
+                           verbose = FALSE)
+      
+      query_assay <- "sketch"
+      cat(ts(), "  Sketch PCA complete\n")
+    } else {
+      # Small enough to run directly
+      obj <- ScaleData(obj, verbose = FALSE)
+      obj <- RunPCA(obj, npcs = min(max(dims), 50),
+                           verbose = FALSE)
+      query_assay <- "RNA"
+    }
+    
+    # Build clean gene-subsetted reference
+    ref_counts_sub <- reference_obj[["RNA"]]$counts[shared_genes, ]
+    ref_sub <- CreateSeuratObject(
+      counts    = ref_counts_sub,
+      meta.data = ref_metadata
+    )
+    rm(ref_counts_sub)
+    
+    ref_sub <- NormalizeData(ref_sub, verbose = FALSE)
+    ref_sub <- FindVariableFeatures(ref_sub, verbose = FALSE)
+    ref_sub <- ScaleData(ref_sub, verbose = FALSE)
+    ref_sub <- RunPCA(ref_sub, verbose = FALSE)
+    ref_sub[["RNA"]]$scale.data <- NULL
+    
+    # Clamp dims
+    max_pc   <- ncol(Embeddings(ref_sub, "pca"))
+    use_dims <- dims[dims <= max_pc]
+    if (length(use_dims) < length(dims)) {
+      cat(ts(), "  Clamped dims to 1:", max(use_dims),
+          "(reference has", max_pc, "PCs)\n")
+    }
+    
+    # indTransferAnchors needs in-memory counts
+    # Materialise only the query assay counts back to sparse for anchor
+    # search. For sketch this is only ~15K cells; for small regions it's
+    # the full set.
+    obj[[query_assay]]$counts <- as(
+      object = obj[[query_assay]]$counts,
+      Class  = "dgCMatrix"
+    )
+    
+    cat(ts(), "  Finding transfer anchors...\n")
+    anchors <- FindTransferAnchors(
+      reference           = ref_sub,
+      query               = obj,
+      query.assay         = query_assay,
+      dims                = use_dims,
+      reference.reduction = "pca",
+      verbose             = FALSE
+    )
+    
+    # Transfer labels to sketch (or full if no sketch)
+    cat(ts(), "  Transferring labels...\n")
+    label_transfer <- TransferData(
+      anchorset = anchors,
+      refdata   = ref_sub[[ref_label_col]][, 1],
+      dims      = use_dims,
+      k.weight  = k.weight,
+      verbose   = FALSE
+    )
+    
+    rm(anchors, ref_sub); gc(verbose = FALSE)
+    
+    obj <- AddMetaData(obj, label_transfer)
+    
+    # Project sketch labels to full dataset
+    if (use_sketch) {
+      cat(ts(), "  Projecting sketch labels to full dataset...\n")
+      
+      # Need PCA on full data for projection. ProjectData computes this.
+      # Materialise full RNA counts back to sparse for ProjectData.
+      obj[["RNA"]]$counts <- as(
+        object = obj[["RNA"]]$counts,
+        Class  = "dgCMatrix"
+      )
+      
+      DefaultAssay(obj) <- "sketch"
+      obj <- ProjectData(
+        object             = obj,
+        assay              = "RNA",
+        full.reduction     = "pca.full",
+        sketched.assay     = "sketch",
+        sketched.reduction = "pca",
+        dims               = use_dims,
+        verbose            = FALSE
+      )
+      
+      DefaultAssay(obj) <- "RNA"
+      obj <- TransferSketchLabels(
+        obj,
+        sketched.assay    = "sketch",
+        reduction         = "pca.full",
+        dims              = use_dims,
+        refdata           = list(predicted.id_full = "predicted.id"),
+        k                 = 50,
+        recompute.neighbors = FALSE,
+        recompute.weights   = FALSE,
+        verbose           = TRUE
+      )
+      
+      # Use the projected labels
+      all_cells     <- colnames(obj)
+      pred_id       <- obj$predicted.id_full
+      pred_score    <- obj$predicted.id_full.score
+      
+    } else {
+      all_cells     <- colnames(obj)
+      pred_id       <- obj$predicted.id
+      # Compute max score from the per-class score columns
+      score_cols    <- grep("^prediction\\.score\\.", colnames(label_transfer), value = TRUE)
+      pred_score    <- apply(label_transfer[, score_cols, drop = FALSE], 1, max)
+    }
+    
+    # Build return metadata
+    pred_meta <- data.frame(
+      predicted_cell_type  = pred_id,
+      prediction_score_max = pred_score,
+      row.names = all_cells
+    )
+    
+    # Clean up temp BPCells dir
+    unlink(query_bp_dir, recursive = TRUE)
+    
+    return(pred_meta)
+  }
+  
+  ##########################################################################
+  # QC plotting — v5-safe layer access
+  ##########################################################################
+  getCellMeans <- function(celltype, obj) {
+    
+    xen_counts <- tryCatch(
+      LayerData(obj, assay = "RNA", layer = "counts"),
+      error = function(e) { return(NULL) }
+    )
+    if (is.null(xen_counts)) return(NULL)
+    
+    ref_counts <- tryCatch(
+      LayerData(reference_obj, assay = "RNA", layer = "counts"),
+      error = function(e) { return(NULL) }
+    )
+    if (is.null(ref_counts)) return(NULL)
+    
+    common_genes <- intersect(rownames(xen_counts), rownames(ref_counts))
+    
+    xen_cells <- colnames(obj)[obj$predicted_cell_type == celltype]
+    ref_cells <- colnames(reference_obj)[ref_labels == celltype]
+    
+    if (length(xen_cells) < 10 || length(ref_cells) < 10) return(NULL)
+    
+    xen_cells <- intersect(xen_cells, colnames(xen_counts))
+    ref_cells <- intersect(ref_cells, colnames(ref_counts))
+    
+    if (length(xen_cells) < 10 || length(ref_cells) < 10) return(NULL)
+    
+    xen_mat <- xen_counts[common_genes, xen_cells, drop = FALSE]
+    ref_mat <- ref_counts[common_genes, ref_cells, drop = FALSE]
+    
+    df <- data.frame(
+      Xenium    = rowMeans(xen_mat),
+      Reference = rowMeans(ref_mat)
+    )
+    
+    df <- df[df$Xenium > 0 & df$Reference > 0, ]
+    return(df)
+  }
+  
+  plotCor <- function(celltype, obj) {
+    
+    df <- getCellMeans(celltype, obj)
+    if (is.null(df) || nrow(df) < 20) return(NULL)
+    
+    fit <- lm(log10(Xenium) ~ log10(Reference), data = df)
+    r2  <- summary(fit)$r.squared
+    
+    p <- ggplot(df, aes(x = Reference, y = Xenium)) +
+      geom_point(size = 0.8, alpha = 0.5, color = "steelblue") +
+      geom_abline(intercept = 0, slope = 1, linetype = 2) +
+      stat_poly_eq() +
+      scale_x_log10(labels = label_log(digits = 1)) +
+      scale_y_log10(labels = label_log(digits = 1)) +
+      xlab("Reference") +
+      ylab("Xenium") +
+      theme_bw(base_size = 8)
+    
+    title <- cowplot::ggdraw() +
+      cowplot::draw_label(
+        paste0(celltype, " (R\u00B2=", round(r2, 2), ")"),
+        x = 0, hjust = 0, size = 10
+      )
+    
+    cowplot::plot_grid(title, p, ncol = 1, rel_heights = c(0.1, 1))
+  }
+  
+  ##########################################################################
+  # Per-region processing
+  ##########################################################################
+  summaries <- list()
+  
+  for (nm in names(regions)) {
+    cat(ts(), "\n----------------------------------------\n")
+    cat(ts(), " REGION:", nm, "\n")
+    
+    info <- regions[[nm]]
+    obj <- readRDS(info$rds_path)
+    
+    region_out <- file.path(output_dir, nm)
+    dir.create(region_out, recursive = TRUE, showWarnings = FALSE)
+    output_rds   <- file.path(region_out, paste0(nm, "_annotated.rds"))
+    metadata_csv <- file.path(region_out, "cell_annotations.csv.gz")
+    plot_pdf     <- file.path(region_out, "reference_correlation_plots.pdf")
+    
+    if (!overwrite && file.exists(output_rds)) {
+      cat(ts(), " Skipping (already annotated)\n")
+      next
+    }
+    
+    # Run annotation — returns prediction metadata only.
+    # Original object with proseg FOV stays intact.
+    pred_meta <- run_10x_annotation(obj, region_name = nm)
+    
+    # Add predictions to the ORIGINAL object (FOV preserved)
+    obj <- AddMetaData(obj, pred_meta)
+    
+    cat(ts(), "  FOVs in annotated object:",
+        paste(Images(obj), collapse = ", "), "\n")
+    
+    Idents(obj) <- "predicted_cell_type"
+    
+    # Save
+    saveRDS(obj, output_rds)
+    fwrite(obj@meta.data, metadata_csv)
+    
+    # Update colour map
+    region_types <- unique(obj$predicted_cell_type)
+    cmap <- assign_colours(region_types)
+    
+    if (plots) {
+      
+      # Correlation plots
+      cat(ts(), "[QC] Generating correlation plots...\n")
+      plist <- lapply(region_types, function(ct) plotCor(ct, obj))
+      plist <- Filter(Negate(is.null), plist)
+      if (length(plist) > 0) {
+        pdf(plot_pdf, width = 12, height = 10)
+        grid.arrange(grobs = plist, nrow = 4)
+        dev.off()
+      }
+      
+      # ImageDimPlot
+      cat(ts(), "[QC] Generating spatial cell type plot...\n")
+      spatial_pdf <- file.path(region_out, "spatial_cell_types.pdf")
+      
+      avail_fovs <- Images(xenium_obj)
+      if (length(avail_fovs) > 0) {
+        fov_name <- avail_fovs[1]
+        
+        p_spatial <- ImageDimPlot(
+          xenium_obj,
+          fov        = fov_name,
+          group.by   = "predicted_cell_type",
+          cols       = cmap,
+          size       = 0.5,
+          dark.background = FALSE
+        ) +
+          ggtitle(paste0(nm, " \u2014 Predicted Cell Types")) +
+          theme(
+            plot.title = element_text(size = 14, face = "bold"),
+            legend.text = element_text(size = 8)
+          )
+        
+        pdf(spatial_pdf, width = 14, height = 12)
+        print(p_spatial)
+        dev.off()
+        
+        cat(ts(), "  Spatial plot saved:", spatial_pdf, "\n")
+      } else {
+        cat(ts(), "  [WARN] No FOV found \u2014 skipping spatial plot.\n")
+      }
+    }
+    
+    summaries[[nm]] <- data.frame(
+      region      = nm,
+      total_cells = ncol(xenium_obj),
+      labeled     = sum(!is.na(xenium_obj$predicted_cell_type)),
+      n_types     = length(unique(xenium_obj$predicted_cell_type))
+    )
+    
+    rm(xenium_obj, pred_meta); gc(verbose = FALSE)
+    cat(ts(), " Region", nm, "complete. Memory released.\n")
+  }
+  
+  # Clean up any remaining temp BPCells dirs
+  unlink(file.path(output_dir, ".bpcells_tmp"), recursive = TRUE)
+  
+  # Global summary
+  if (length(summaries) > 0) {
+    summary_df <- do.call(rbind, summaries)
+    fwrite(summary_df, file.path(output_dir, "annotation_10x_summary.csv"))
+  }
+  
+  # Save colour map
+  if (length(global_cmap) > 0) {
+    cmap_df <- data.frame(
+      cell_type = names(global_cmap),
+      hex       = unlist(global_cmap),
+      stringsAsFactors = FALSE
+    )
+    cmap_path <- file.path(output_dir, "cell_type_colour_map.csv")
+    fwrite(cmap_df, cmap_path)
+    cat(ts(), "[CMAP] Colour map saved:", cmap_path, "\n")
+  }
+  
+  cat(ts(), "\n Annotation complete")
+}
+
 ###############################################################################
-# ANNOTATE PROSEG-SEURAT OBJECT BASED ON REFERENCE MODEL
+# ANNOTATE PROSEG-SEURAT OBJECT BASED ON REFERENCE MODEL WITH SINGLER/RCTD
 ###############################################################################
 
 annotate_proseg_seurat <- function(proseg_dir,
