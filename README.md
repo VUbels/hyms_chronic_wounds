@@ -32,7 +32,7 @@ Rscript ./scripts/convert_to_h5ad.R
 ```
 You now have fully annotated RDS and H5AD files.
 
-** To run niche identification run:
+**To run niche identification run:**
 ```
 python3 ./scripts/run_nichecompass_integrated.py
 ```
