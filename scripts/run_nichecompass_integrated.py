@@ -64,7 +64,7 @@ CONDITION_MAP = {
 }
 
 # Spatial graph
-N_NEIGHBORS = 8  # User guide: smaller = better NID; 8 is good for single-cell
+N_NEIGHBORS = 4  # User guide: smaller = better NID; 8 is good for single-cell
 
 # Gene programs
 SPECIES = "human"
@@ -80,7 +80,7 @@ GP_SOURCES_CATEGORIES_MASK_KEY = "nichecompass_gp_sources_categories"
 LATENT_KEY = "nichecompass_latent"
 
 # Architecture — GATv2 recommended for single-cell resolution data
-CONV_LAYER_ENCODER = "gatv2conv"
+CONV_LAYER_ENCODER = "gcnconv"
 ACTIVE_GP_THRESH_RATIO = 0.01
 
 # Training
